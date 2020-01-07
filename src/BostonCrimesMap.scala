@@ -2,11 +2,9 @@ package com.example
 
 import java.sql.Timestamp
 
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.expressions.Window
-
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{SparkSession, _}
 
 case class Crime(
                   INCIDENT_NUMBER: Option[String],
@@ -33,6 +31,14 @@ case class OffenceCodes(
                          NAME: Option[String]
                        )
 
+case class bostoncrimes(district: Option[String],
+                        crimes_total: Option[BigInt],
+                        crimes_monthly: Option[BigInt],
+                        frequent_crime_types: Option[String],
+                        lat: Option[Double],
+                        lng: Option[Double]
+                       )
+
 object BostonCrimesMap extends App {
   val spark = SparkSession.builder().master("local").getOrCreate()
 
@@ -45,73 +51,64 @@ object BostonCrimesMap extends App {
   val dfCrime = spark.read.format("csv")
     .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load("source/crime.csv").as[Crime]
 
-  val dfCrime1 = dfCrime
-    .select(dfCrime("DISTRICT").as("district"),
-      date_trunc("Day", dfCrime("OCCURRED_ON_DATE")).as("OCCURRED_ON_DATE"))
-    .where($"district" === "A1")
-    .groupBy($"district",
-      $"OCCURRED_ON_DATE")
-    .agg(count("*").as("crimes_total")
-    )
-    .select($"district",
-      $"crimes_total",
-      $"OCCURRED_ON_DATE"
-      //      avg(dfCrime("Lat")),
-      //      avg(dfCrime("Long"))
-    )
-    .orderBy($"OCCURRED_ON_DATE")
+  val dfOffenceCodes = spark.read.format("csv")
+    .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load("source/offense_codes.csv").as[OffenceCodes]
 
 
-  val dfCrime12 = dfCrime
-    .select(dfCrime("DISTRICT").as("district"),
-      $"OFFENSE_CODE")
-    .where($"district" === "A1")
-    .groupBy($"district",
-      $"OFFENSE_CODE")
-    .agg(count("OFFENSE_CODE").as("cnt_offense_code")
-    )
-    .withColumn("rn", row_number().over(Window.orderBy($"cnt_offense_code".desc)))
-    .select($"district",
+  val crimeType = dfCrime
+    .select(coalesce(dfCrime("DISTRICT"), lit("null")).as("district"),
       $"OFFENSE_CODE",
-      $"rn"
+      $"Lat",
+      $"Long"
     )
-    .orderBy($"rn")
-  println(dfCrime12.show(300))
+    .withColumn("lat", avg($"Lat").over(Window.partitionBy($"district")))
+    .withColumn("lng", avg($"Long").over(Window.partitionBy($"district")))
+    .groupBy($"district", $"lat", $"lng",
+      $"OFFENSE_CODE".as("offense_code"))
+    .agg(count("OFFENSE_CODE").as("cnt_offense_code"))
+    .withColumn("rnk", dense_rank().over(Window.partitionBy($"district").orderBy($"cnt_offense_code".desc)))
+    .where($"rnk" < 4)
+    .orderBy($"district", $"rnk")
+    .join(broadcast(dfOffenceCodes), $"offense_code" === dfOffenceCodes("CODE"))
+    .select($"district",
+      $"offense_code",
+      $"cnt_offense_code",
+      $"rnk",
+      $"NAME",
+      $"lat",
+      $"lng")
+    .withColumn("crime_type", lit(trim(split($"NAME", "-").getItem(0))))
+    .orderBy($"district", $"rnk")
+    .groupBy($"district", $"lat", $"lng")
+    .agg(concat_ws(", ", collect_set("crime_type")).as("frequent_crime_types"),
+      concat_ws(", ", collect_set("offense_code")).as("frequent_crime_types_code"))
+    .orderBy($"district")
+  //println(crimeType.show(40, 19))
 
-  val dfCrime11 = dfCrime1.withColumn("date_month", trunc($"OCCURRED_ON_DATE", "mm"))
+  val crime = dfCrime
+    .select(coalesce(dfCrime("DISTRICT"), lit("null")).as("district"),
+      date_trunc("Month", dfCrime("OCCURRED_ON_DATE")).as("date_month"))
+    //.where($"district" === "A1")
     .groupBy($"district", $"date_month")
-    .agg(callUDF("percentile_approx", $"crimes_total", lit(0.5)).as("mediana"),
-      sum($"crimes_total").as("sum_crimes_total"))
-    .withColumn("sumCrimesTotal", sum($"sum_crimes_total").over(Window.partitionBy($"district")))
-    .orderBy($"date_month")
+    .agg(count("*").as("crimes_total"))
+    .groupBy($"district")
+    .agg(callUDF("percentile_approx", $"crimes_total", lit(0.5)).as("crimes_monthly"),
+      sum($"crimes_total").as("crimes_total"))
+    .orderBy($"district")
 
-  // println(dfCrime11.show(1000))
-  //dfCrime1.createTempView("dfCrime1")
-  //  val dfCrime2 = spark.sql(
-  //    """Select district,trunc(OCCURRED_ON_DATE,"mm") as date,
-  //      | percentile_approx(crimes_total,0.5) as mediana,
-  //      | sum(crimes_total) as sum_crimes_total
-  //      | from dfCrime1
-  //      | group by district, trunc(OCCURRED_ON_DATE,"mm")
-  //      | order by date""".stripMargin)
-  //  println(dfCrime2.show())
-  //  val dfOffenceCodes = spark.read.format("csv")
-  //    .option("delimiter ", ",")
-  //    .option("header", "true")
-  //    .option("inferSchema", true)
-  //    .load("source/offense_codes.csv").as[OffenceCodes]
+  val df: Dataset[bostoncrimes] = crimeType
+    .join(crime, crimeType("district") === crime("district"))
+    .select(crime("district"),
+      $"crimes_total",
+      $"crimes_monthly",
+      $"frequent_crime_types",
+      $"lat",
+      $"lng"
+    ).as[bostoncrimes]
 
-
-  //  val df = dfCrime
-  //    .join(broadcast(dfOffenceCodes), dfCrime("OFFENSE_CODE") === dfOffenceCodes("CODE"))
-  //    .select(dfCrime("DISTRICT").as("district"))
-  //    .groupBy($"district")
-  //    .agg(count("*").as("crimes_total"))
-  //    .select($"district",
-  //      $"crimes_total"
-  //      //      avg(dfCrime("Lat")),
-  //      //      avg(dfCrime("Long"))
-  //    )
-  //    .orderBy($"district")
-  //  println(df.show())
+  println(df.show(14, 10))
+  df.printSchema()
+  //df.write.parquet("source/1")
+  //df.write.mode(SaveMode.Overwrite).parquet("/source/1")
+  df.write.parquet("myTable.parquet")
 }
