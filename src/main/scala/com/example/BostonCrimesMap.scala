@@ -5,6 +5,7 @@ import java.sql.Timestamp
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{SparkSession, _}
+import org.apache.log4j.{Level, Logger}
 
 case class Crime(
                   INCIDENT_NUMBER: Option[String],
@@ -27,6 +28,7 @@ case class Crime(
                 )
 
 case class OffenceCodes(
+
                          CODE: Option[Int],
                          NAME: Option[String]
                        )
@@ -44,12 +46,17 @@ object BostonCrimesMap extends App {
 
   import spark.implicits._
 
+  Logger.getLogger("org").setLevel(Level.OFF)
+
   val sc = spark.sparkContext
   val dfCrime = spark.read.format("csv")
     .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load(args(0)).as[Crime]
 
   val dfOffenceCodes = spark.read.format("csv")
     .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load(args(1)).as[OffenceCodes]
+    .distinct()
+  println(dfOffenceCodes.count())
+  println(dfOffenceCodes.distinct().count())
 
 
   val crimeType = dfCrime
@@ -76,24 +83,38 @@ object BostonCrimesMap extends App {
     .withColumn("crime_type", lit(trim(split($"NAME", "-").getItem(0))))
     .orderBy($"district", $"rnk")
     .groupBy($"district", $"lat", $"lng")
-    .agg(concat_ws(", ", collect_set("crime_type")).as("frequent_crime_types"),
-      concat_ws(", ", collect_set("offense_code")).as("frequent_crime_types_code"))
+    .agg(concat_ws(", ", collect_list("crime_type")).as("frequent_crime_types"),
+      concat_ws(", ", collect_list("offense_code")).as("frequent_crime_types_code"))
     .orderBy($"district")
   //println(crimeType.show(40, 19))
 
   val crime = dfCrime
     .select(coalesce(dfCrime("DISTRICT"), lit("null")).as("district"),
-      date_trunc("Month", dfCrime("OCCURRED_ON_DATE")).as("date_month"))
+      $"MONTH"
+      //date_trunc("Month", dfCrime("OCCURRED_ON_DATE")).as("date_month")
+    )
     //.where($"district" === "A1")
-    .groupBy($"district", $"date_month")
+   // .groupBy($"district", $"date_month")
+    .groupBy($"district", $"MONTH")
     .agg(count("*").as("crimes_total"))
+    //.orderBy($"district", $"date_month")
+    .orderBy($"district", $"MONTH")
+
+  println(crime.show(4000))
+
+  val mediana = crime
     .groupBy($"district")
     .agg(callUDF("percentile_approx", $"crimes_total", lit(0.5)).as("crimes_monthly"),
       sum($"crimes_total").as("crimes_total"))
     .orderBy($"district")
+    .select($"district",
+      $"crimes_total",
+      $"crimes_monthly"
+    )
+  println(mediana.show())
 
   val df: Dataset[bostoncrimes] = crimeType
-    .join(crime, crimeType("district") === crime("district"))
+    .join(mediana, crimeType("district") === mediana("district"))
     .select(crime("district"),
       $"crimes_total",
       $"crimes_monthly",
@@ -102,6 +123,6 @@ object BostonCrimesMap extends App {
       $"lng"
     ).as[bostoncrimes]
 
-  //println(df.show(14, 10))
+  //println(df.show(14, false))
   df.coalesce(1).write.mode(SaveMode.Overwrite).parquet(args(2))
 }
