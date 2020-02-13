@@ -55,6 +55,7 @@ object BostonCrimesMap extends App {
   val dfOffenceCodes = spark.read.format("csv")
     .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load(args(1)).as[OffenceCodes]
     .distinct()
+    .dropDuplicates("CODE")
   println(dfOffenceCodes.count())
   println(dfOffenceCodes.distinct().count())
 
