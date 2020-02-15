@@ -56,9 +56,6 @@ object BostonCrimesMap extends App {
     .option("delimiter ", ",").option("header", "true").option("inferSchema", true).load(args(1)).as[OffenceCodes]
     .distinct()
     .dropDuplicates("CODE")
-  println(dfOffenceCodes.count())
-  println(dfOffenceCodes.distinct().count())
-
 
   val crimeType = dfCrime
     .select(coalesce(dfCrime("DISTRICT"), lit("null")).as("district"),
@@ -73,7 +70,7 @@ object BostonCrimesMap extends App {
     .withColumn("rnk", dense_rank().over(Window.partitionBy($"district").orderBy($"cnt_offense_code".desc)))
     .where($"rnk" < 4)
     .orderBy($"district", $"rnk")
-    .join(broadcast(dfOffenceCodes), $"offense_code" === dfOffenceCodes("CODE"))
+    .join(broadcast(dfOffenceCodes) , $"offense_code" === dfOffenceCodes("CODE"))
     .select($"district",
       $"offense_code",
       $"cnt_offense_code",
@@ -87,21 +84,14 @@ object BostonCrimesMap extends App {
     .agg(concat_ws(", ", collect_list("crime_type")).as("frequent_crime_types"),
       concat_ws(", ", collect_list("offense_code")).as("frequent_crime_types_code"))
     .orderBy($"district")
-  //println(crimeType.show(40, 19))
+ // println(crimeType.show(40, false))
 
   val crime = dfCrime
     .select(coalesce(dfCrime("DISTRICT"), lit("null")).as("district"),
-      $"MONTH"
-      //date_trunc("Month", dfCrime("OCCURRED_ON_DATE")).as("date_month")
+      $"MONTH",$"YEAR"
     )
-    //.where($"district" === "A1")
-   // .groupBy($"district", $"date_month")
-    .groupBy($"district", $"MONTH")
+    .groupBy($"district",$"YEAR",$"MONTH")
     .agg(count("*").as("crimes_total"))
-    //.orderBy($"district", $"date_month")
-    .orderBy($"district", $"MONTH")
-
-  println(crime.show(4000))
 
   val mediana = crime
     .groupBy($"district")
@@ -112,7 +102,7 @@ object BostonCrimesMap extends App {
       $"crimes_total",
       $"crimes_monthly"
     )
-  println(mediana.show())
+  //println(mediana.show())
 
   val df: Dataset[bostoncrimes] = crimeType
     .join(mediana, crimeType("district") === mediana("district"))
@@ -124,6 +114,6 @@ object BostonCrimesMap extends App {
       $"lng"
     ).as[bostoncrimes]
 
-  //println(df.show(14, false))
+  println(df.show(14, false))
   df.coalesce(1).write.mode(SaveMode.Overwrite).parquet(args(2))
 }
